@@ -54,8 +54,7 @@ class CapabilityEngine:
         return sys.modules[type(self.r).__module__]
 
     def _save(self, data: dict) -> None:
-        with self.ngr.file_lock(Path(self.r.dir) / ".caps-lock"):
-            self.ngr.atomic_write(self.path, json.dumps(data, indent=1))
+        self.ngr.atomic_write(self.path, json.dumps(data, indent=1))     # callers hold _txn(): load-modify-save must be one locked unit
 
     def _entry(self, agent: str) -> dict:
         return self.load()["agents"].get(agent) or {}
@@ -86,7 +85,14 @@ class CapabilityEngine:
     def is_ok(self, agent: str, cap: str) -> bool:
         return self.status(agent, cap)["ok"]
 
+    def _txn(self):
+        return self.ngr.file_lock(Path(self.r.dir) / ".caps-lock")
+
     def mark_stale(self, agent: str, caps: tuple[str, ...] | list[str], reason: str) -> None:
+        with self._txn():
+            self._mark_stale(agent, caps, reason)
+
+    def _mark_stale(self, agent: str, caps, reason: str) -> None:
         data = self.load()
         ent = data["agents"].get(agent)
         if not ent:
@@ -98,6 +104,10 @@ class CapabilityEngine:
         self._save(data)
 
     def record(self, agent: str, cap: str, ok: bool, evidence: str, failure: str | None, tool_version: str | None, model: str | None, env: dict) -> None:
+        with self._txn():
+            self._record(agent, cap, ok, evidence, failure, tool_version, model, env)
+
+    def _record(self, agent: str, cap: str, ok: bool, evidence: str, failure: str | None, tool_version: str | None, model: str | None, env: dict) -> None:
         data = self.load()
         ent = data["agents"].setdefault(agent, {"capabilities": {}})
         ent.update(tool_version=tool_version or ent.get("tool_version"), model=model or ent.get("model") or "not reported by the CLI", environment=env)

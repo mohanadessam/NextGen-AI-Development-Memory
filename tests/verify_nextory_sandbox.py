@@ -36,8 +36,8 @@ before = fingerprint()
 R = ngr.Router(ctl)
 R.cfg["verifier_backend"] = "appcontainer"
 R.cfg["sandbox_extra_dirs"] = ["vendor"]
-R.cfg["verify_timeout_s"] = 1500
-R.cfg["verify_memory_mb"] = 3072
+R.lim["verify_timeout_s"] = 3300      # NOTE: limits live in R.lim (cfg["limits"]); the earlier cfg[...] assignment was silently ignored
+R.lim["verify_memory_mb"] = 3072
 R.cfg["sandbox_env"] = {"APP_KEY": "base64:" + base64.b64encode(secrets.token_bytes(32)).decode(), "APP_ENV": "testing", "DB_CONNECTION": "sqlite", "DB_DATABASE": ":memory:",
                         "CACHE_STORE": "array", "SESSION_DRIVER": "array", "QUEUE_CONNECTION": "sync", "MAIL_MAILER": "array", "TELESCOPE_ENABLED": "false", "PULSE_ENABLED": "false"}
 argv = ["php", "vendor/phpunit/phpunit/phpunit", "--do-not-cache-result", *extra]

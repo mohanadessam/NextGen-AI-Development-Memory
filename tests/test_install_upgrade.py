@@ -34,6 +34,25 @@ def digest(root: Path, ignore_router=True) -> dict:
 
 @unittest.skipUnless((SRC / "tools" / "ngmem.py").is_file(), "Nextory v1.1 sample not available")
 class UpgradeAudit(unittest.TestCase):
+    def strip_router_from_fixture(self):
+        pairs = [("<!-- NEXTGEN_ROUTER_START -->", "<!-- NEXTGEN_ROUTER_END -->"), ("# >>> NextGen router v1.2 >>>", "# <<< NextGen router v1.2 <<<"),
+                 ("# >>> nextgen-router (managed by install.py; rollback with --rollback-router) >>>", "# <<< nextgen-router <<<")]
+        for rel in ("AGENTS.md", ".gitignore", ".codex/config.toml"):
+            f = self.p / rel
+            if f.is_file():
+                t = f.read_text(encoding="utf-8")
+                for a, b in pairs:
+                    while a in t and b in t:
+                        x, y = t.index(a), t.index(b, t.index(a)) + len(b)
+                        t = t[:x].rstrip() + "\n" + t[y:].lstrip("\n")
+                f.write_text(t, encoding="utf-8")
+        for rel in (".mcp.json", ".agents/mcp_config.json"):
+            f = self.p / rel
+            if f.is_file():
+                o = json.loads(f.read_text(encoding="utf-8"))
+                o.get("mcpServers", {}).pop("nextgen-router", None)
+                f.write_text(json.dumps(o, indent=2), encoding="utf-8")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -43,6 +62,7 @@ class UpgradeAudit(unittest.TestCase):
                 (self.p / rel).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(SRC / rel, self.p / rel)
         shutil.copytree(SRC / "ai-memory", self.p / "ai-memory", ignore=shutil.ignore_patterns("router", ".memory-write-lock"))
+        self.strip_router_from_fixture()      # the real source project may already have the router installed (Nextory does since 2026-10-14)
         # make the sample conspicuously "custom" so preservation is provable
         with (self.p / "AGENTS.md").open("a", encoding="utf-8") as f:
             f.write("\n\n## CUSTOM RULE (must survive)\nNever touch the billing tables.\n")
@@ -147,7 +167,7 @@ class UpgradeAudit(unittest.TestCase):
         env = {**ENV, "NGMEM_TOOLS_DIR": str(self.p / "tools")}
         r = subprocess.run([sys.executable, str(self.p / "tools" / "test_ngmem.py")], capture_output=True, text=True, env=env, timeout=600)
         self.assertIn("Ran 45 tests", r.stderr + r.stdout)
-        self.assertIn("OK", (r.stderr + r.stdout).strip().splitlines()[-1])
+        self.assertIn("OK", (r.stderr + r.stdout).strip().splitlines()[-1], (r.stderr + r.stdout)[-2500:])
         tl = subprocess.run([sys.executable, str(self.p / "tools" / "ngmem.py"), "--project", str(self.p), "mcp"], input='{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n', capture_output=True, text=True, env=ENV)
         self.assertTrue(len(json.loads(tl.stdout)["result"]["tools"]) >= 7)
 
@@ -169,6 +189,59 @@ class UpgradeAudit(unittest.TestCase):
         self.assertIn("Duplicate skipped", b.record(self.p, "LOG", "Router bridge test — اختبار", "unicode ✓ details"), "v1.1 de-duplication still in charge")
         self.assertIn("Recorded by:** NextGen-Router", (self.p / "ai-memory" / "LOG.md").read_text(encoding="utf-8"))
         self.assertIn("Sessions".lower(), b.snippet(self.p).lower())
+
+
+class InstallerHardening(unittest.TestCase):
+    """Confirmed Codex-review findings: links, manifest traversal, rerun re-baselining."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.p = Path(self.tmp.name) / "proj"
+        self.p.mkdir()
+        (self.p / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+        subprocess.run([sys.executable, str(KIT / "install.py"), "--project", str(self.p), "--skip-mcp"], check=True, capture_output=True, env=ENV)
+
+    def run_inst(self, *a):
+        return subprocess.run([sys.executable, str(KIT / "install.py"), "--project", str(self.p), *a], capture_output=True, text=True, env=ENV)
+
+    def test_rerun_does_not_rebaseline_user_edits(self):
+        self.run_inst("--router-only")
+        with (self.p / "AGENTS.md").open("a", encoding="utf-8") as f:
+            f.write("\nUSER EDIT AFTER INSTALL\n")
+        self.run_inst("--router-only")
+        self.run_inst("--rollback-router")
+        self.assertIn("USER EDIT AFTER INSTALL", (self.p / "AGENTS.md").read_text(encoding="utf-8"))
+
+    def test_rollback_ignores_manifest_paths_outside_the_project(self):
+        self.run_inst("--router-only")
+        victim = Path(self.tmp.name) / "victim.txt"
+        victim.write_text("keep", encoding="utf-8")
+        mp = self.p / "ai-memory" / "router" / "install-manifest.json"
+        m = json.loads(mp.read_text(encoding="utf-8"))
+        m["entries"]["../victim.txt"] = {"existed_before": False, "pre_sha": None, "backup": None, "post_sha": hashlib.sha256(b"keep").hexdigest()}
+        mp.write_text(json.dumps(m), encoding="utf-8")
+        self.run_inst("--rollback-router")
+        self.assertTrue(victim.is_file())
+
+    def test_preexisting_router_mcp_entry_survives_rollback(self):
+        mcp = {"mcpServers": {"nextgen-router": {"command": "mine"}}}
+        (self.p / ".mcp.json").write_text(json.dumps(mcp), encoding="utf-8")
+        self.run_inst("--router-only")
+        self.run_inst("--rollback-router")
+        self.assertEqual(json.loads((self.p / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["nextgen-router"], {"command": "mine"})
+
+    def test_linked_destination_is_refused(self):
+        target = Path(self.tmp.name) / "hook"
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.p / "AGENTS.md").unlink()
+        try:
+            os.symlink(target, self.p / "AGENTS.md")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not permitted here")
+        r = self.run_inst("--router-only")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), "#!/bin/sh\n")
 
 
 if __name__ == "__main__":

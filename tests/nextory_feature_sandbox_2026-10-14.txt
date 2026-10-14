@@ -1,0 +1,8 @@
+running in the sandbox: php vendor/phpunit/phpunit/phpunit --do-not-cache-result --testsuite Feature
+
+score=0.0 rc=2 in 1863s
+[appcontainer sandbox: no network, no host env, throwaway copy] rc=2 passed=? failed=91 :: There were 91 errors: ... Tests: 1182, Assertions: 4355, Errors: 91, Failures: 5, PHPUnit Deprecations: 8, Skipped: 3.
+
+Nextory working tree byte-identical before/after: True
+the sandbox copy is built from the git-visible file list; .env* real files in it: []
+exit=0

@@ -126,16 +126,26 @@ class Manifest:
 
     def touch(self, path: Path, action) -> str:
         rel = path.relative_to(self.project).as_posix()
+        # never write through a link or outside the project (a linked AGENTS.md could otherwise rewrite .git/hooks/*)
+        probe = path
+        while not probe.exists() and probe != self.project:
+            probe = probe.parent
+        if path.is_symlink() or probe.is_symlink() or not probe.resolve().is_relative_to(self.project.resolve()):
+            raise SystemExit(f"refusing to modify {rel}: it is a link or resolves outside the project")
         pre_exists, pre = path.is_file(), sha(path)
         before = set(path.parent.glob(path.name + ".ngmem-backup-*")) if path.parent.is_dir() else set()
         msg = action()
         new_backups = sorted(set(path.parent.glob(path.name + ".ngmem-backup-*")) - before)
+        post = sha(path)
+        if post == pre:      # unchanged: not ours to roll back, and a rerun must not re-baseline later user edits
+            return msg
         ent = self.data["entries"].get(rel)
         if ent is None:
             ent = self.data["entries"][rel] = {"existed_before": pre_exists, "pre_sha": pre, "backup": None}
         if new_backups and ent["backup"] is None:
             ent["backup"] = new_backups[-1].relative_to(self.project).as_posix()
-        ent["post_sha"] = sha(path)
+        ent["post_sha"] = post
+        self.save()      # persisted after every step so a later failure still leaves a usable rollback manifest
         return msg
 
     def save(self) -> None:
@@ -214,8 +224,12 @@ def rollback_router(project: Path) -> None:
         return
     man = json.loads(mp.read_text(encoding="utf-8"))
     print(f"\n== Rolling back router add-on in {project} ==")
+    root = project.resolve()
     for rel, ent in reversed(list(man["entries"].items())):
         path = project / rel
+        if Path(rel).is_absolute() or not path.resolve().is_relative_to(root) or (ent.get("backup") and (Path(ent["backup"]).is_absolute() or not (project / ent["backup"]).resolve().is_relative_to(root))):
+            print(f"  {rel}: manifest entry points outside the project - skipped")
+            continue
         cur = sha(path)
         if cur is None:
             print(f"  {rel}: already gone")

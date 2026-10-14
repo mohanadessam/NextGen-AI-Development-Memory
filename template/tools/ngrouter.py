@@ -45,6 +45,7 @@ EXTERNAL_SOURCES = ("test_runner", "reproduction", "user", "coordinator_inspecti
 MCP_EVIDENCE_SOURCES = ("coordinator_inspection",)       # an MCP caller is an agent: its claims are attested, never "tests" or "user"
 # Verification commands are NOT free-form: a plan may only name one of the administrator-defined verifiers in config.json.
 DEFAULT_VERIFIERS = {"python-unittest": ["python", "-m", "unittest"], "pytest": ["python", "-m", "pytest", "-q"]}
+WRITES_OFF_MSG = "Writes are switched off for this project (config allow_writes=false); the router is read-only here."
 HIGH_RISK_MSG = ("High-risk writes are DISABLED in this release: an approval cannot be enforced against agents that run as the same OS user "
                  "(they can edit plan/state files or import this module). Make such changes yourself, or in a separate OS-sandboxed account.")
 AGENT_TOOL_PATHS = (".claude", ".codex", ".agents", ".gemini", ".antigravity", ".mcp.json")      # agent CLIs keep their own local state here
@@ -100,6 +101,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sandbox_runtimes": {},             # {"php": "C:/xampp/php"}: runtime directory per program name (default: python -> sys.base_prefix, others -> dir found on PATH)
     "sandbox_runtime_args": {},         # {"php": ["-n", "-d", "extension_dir={runtime}\ext", ...]} overrides the built-in launch arguments
     "sandbox_env": {},                  # the ONLY environment variables the verifier sees (besides PYTHONUTF8/PYTHONDONTWRITEBYTECODE)
+    "allow_writes": True,               # False: this project is read-only for the router (write plans are refused at plan AND execute time)
     "auto_handoff": "write",            # "write" (default): memory handoff after write plans | "all" | "off"
     "auto_revalidate": True,            # re-probe stale/expired capabilities of a known agent once before using it for write/review work
     "agent_command_allow": [],          # extra exact command prefixes agents without a native sandbox may run (each a list of argv tokens)
@@ -608,6 +610,7 @@ class MemoryBridge:
 def plan_fingerprint(pl: dict) -> str:
     """Tamper-evidence only (an unkeyed hash is NOT authorisation): what runs, where, with which scope and verifier."""
     core = {"plan_id": pl["plan_id"], "task": pl["task"], "mode": pl["mode"], "files": pl["files"], "verify_cmd": pl["verify_cmd"],
+            "verify_argv": pl.get("verify_argv"), "allow_test_changes": bool(pl.get("allow_test_changes")),
             "coordinator": pl["coordinator"], "risk": pl["analysis"]["risk"], "requires_approval": pl["requires_approval"],
             "slots": [[s["slot_id"], s["subtask"], s["mode"], s["scope"], s["candidates"]] for st in pl["stages"] for s in st["slots"]]}
     return hashlib.sha256(json.dumps(core, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -699,7 +702,7 @@ class Router:
                 if k in cfg["agents"]:
                     cfg["agents"][k].update(v)
             cfg["limits"].update(user.get("limits") or {})
-            for k in ("max_concurrent_plans", "verifiers", "env_passthrough", "agent_command_allow", "auto_revalidate", "protected_paths", "harness_globs", "auto_handoff",
+            for k in ("max_concurrent_plans", "verifiers", "env_passthrough", "agent_command_allow", "auto_revalidate", "protected_paths", "harness_globs", "auto_handoff", "allow_writes",
                       "verifier_backend", "sandbox_extra_dirs", "sandbox_runtimes", "sandbox_env", "sandbox_runtime_args"):
                 if k in user:
                     cfg[k] = user[k]
@@ -744,7 +747,7 @@ class Router:
         if not isinstance(cfg.get("sandbox_runtimes"), dict) or not isinstance(cfg.get("sandbox_env"), dict) or not isinstance(cfg.get("sandbox_extra_dirs"), list):
             raise RouterError("config sandbox_runtimes/sandbox_env must be objects and sandbox_extra_dirs a list")
         for d in cfg["sandbox_extra_dirs"]:
-            if not isinstance(d, str) or d.startswith(("/", "\\")) or ".." in d.replace("\\", "/").split("/") or re.match(r"^[A-Za-z]:", d):
+            if not isinstance(d, str) or d.strip(" ./\\") == "" or d.startswith(("/", "\\")) or ".." in d.replace("\\", "/").split("/") or re.match(r"^[A-Za-z]:", d):
                 raise RouterError(f"config sandbox_extra_dirs entry '{d}' must be a relative path inside the project")
         for k in ("verify_timeout_s", "verify_memory_mb", "verify_max_processes"):
             if k in lim and (not num(lim[k]) or lim[k] <= 0):
@@ -761,8 +764,10 @@ class Router:
         p = self.dir / "state.json"
         base = {"detect": {}, "cooldowns": {}, "breakers": {}, "tasks": {}, "locks": {}, "verified": {}, "task_hashes": {}}
         if p.is_file():
-            with contextlib.suppress(ValueError):
+            try:
                 base.update(json.loads(p.read_text(encoding="utf-8")))
+            except ValueError as exc:     # fail closed: silently resetting would erase scope locks, leases, cooldowns and breakers
+                raise RouterError(f"state.json is corrupt ({exc}); refusing to continue with reset safety state. Inspect or restore ai-memory/router/state.json")
         return base
 
     def _update_state(self, fn) -> Any:
@@ -824,7 +829,8 @@ class Router:
         ad, acfg = ADAPTERS[agent], self.cfg["agents"][agent]
         st = self._state()
         cached = st["detect"].get(agent)
-        if cached and not force and time.time() - cached["ts"] < self.lim["detect_ttl_s"]:
+        # the administrator's enabled flag is read live: a cached detection must never outlive a config change
+        if cached and not force and time.time() - cached["ts"] < self.lim["detect_ttl_s"] and (cached.get("detail") == "disabled in config") == (not acfg.get("enabled", True)):
             return cached
         info = {"ts": time.time(), "installed": False, "authenticated": False, "binary": None, "detail": ""}
         if not acfg.get("enabled", True):
@@ -1058,6 +1064,8 @@ class Router:
             raise RouterError("task must be non-empty")
         if mode not in ("read-only", "write"):
             raise RouterError("mode must be read-only or write")
+        if mode == "write" and self.cfg.get("allow_writes") is not True:
+            raise RouterError(WRITES_OFF_MSG)
         for name in (agent, reviewer):
             if name and name not in AGENTS:
                 raise RouterError(f"Unknown agent: {name}; choose {', '.join(AGENTS)}")
@@ -1384,6 +1392,8 @@ class Router:
         ev.append({"kind": "schema_valid", "source": "router_process", "score": 1.0 if valid else 0.0, "detail": "result JSON matches the required shape" if valid else "missing/invalid result JSON (reviewers must include verdict)"})
         if not valid:
             return ev, None
+        if role == "reviewer" and obj.get("verdict") == "issues_found" and not obj["findings"]:
+            obj["verdict"] = "inconclusive"     # found live: a reviewer that could not run anything said 'issues' while naming no defect; that is not a defect finding
         if mode == "read-only":
             ok = pre == post
             ev.append({"kind": "readonly_integrity", "source": "router_git", "score": 1.0 if ok else 0.0, "detail": "working tree unchanged" if ok else "READ-ONLY VIOLATION: tree changed"})
@@ -1487,6 +1497,8 @@ class Router:
         custom = {k.lower(): v for k, v in self.cfg.get("sandbox_runtime_args", {}).items()}
         if name in custom:
             return [str(a).replace("{runtime}", str(runtime)) for a in custom[name]]
+        if name == "node":      # the AppContainer cannot lstat the drive root, which node's realpath walk does; run test files in-process (node --test spawns children and hangs)
+            return ["--preserve-symlinks", "--preserve-symlinks-main"]
         if name == "php":
             args = ["-n", "-d", f"extension_dir={runtime}{os.sep}ext", "-d", "date.timezone=UTC", "-d", "memory_limit=1G"]
             for e in self.PHP_EXTENSIONS:
@@ -1502,7 +1514,11 @@ class Router:
             return {"kind": "tests", "source": "test_runner", "score": 0.0, "rc": None, "detail": f"verifier program '{argv[0]}' has no runtime directory to stage (set config sandbox_runtimes)"}
         cache = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "NextGen-Router" / "runtimes" / (re.sub(r"\W+", "_", str(rt)) + f"_{int(rt.stat().st_mtime)}")
         if not cache.is_dir():
-            sb.stage_runtime(rt, cache)
+            if re.sub(r"\.(exe|cmd|bat)$", "", Path(argv[0]).name.lower()) == "node" and (rt / "node.exe").is_file():
+                cache.mkdir(parents=True)
+                shutil.copy2(rt / "node.exe", cache / "node.exe")       # node.exe alone is enough; npm and its tree are neither needed nor wanted inside the sandbox
+            else:
+                sb.stage_runtime(rt, cache)
         exe_name = next((n for n in (Path(argv[0]).name, Path(argv[0]).name + ".exe") if (cache / n).is_file()), None)
         if exe_name is None:
             return {"kind": "tests", "source": "test_runner", "score": 0.0, "rc": None, "detail": f"{argv[0]} not found inside the staged runtime {cache.name}"}
@@ -1518,8 +1534,16 @@ class Router:
                 shutil.copy2(src, ws / rel)
             for extra in self.cfg["sandbox_extra_dirs"]:
                 srcd = (self.project / extra) if (self.project / extra).is_dir() else (cwd / extra)
-                if srcd.is_dir():
-                    shutil.copytree(srcd, ws / extra, symlinks=False, ignore_dangling_symlinks=True, dirs_exist_ok=True)
+                root = self.project.resolve()
+                if srcd.is_dir() and not srcd.is_symlink() and srcd.resolve().is_relative_to(root):
+                    for f in srcd.rglob("*"):
+                        # links/junctions are never followed, and a file already staged from the worktree (the agent's version) is never overwritten
+                        if f.is_symlink() or not f.is_file() or not f.resolve().is_relative_to(root):
+                            continue
+                        dst = ws / extra / f.relative_to(srcd)
+                        if not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(f, dst)
             env = {"PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1", **{str(k): str(v) for k, v in self.cfg["sandbox_env"].items()}}
             res = sb.run_sandboxed([str(cache / exe_name), *self._runtime_args(argv[0], cache), *argv[1:]], workspace=ws, readonly_dirs=[cache], env=env, timeout_s=self.lim["verify_timeout_s"],
                                    memory_mb=self.lim["verify_memory_mb"], max_processes=self.lim["verify_max_processes"])
@@ -1769,16 +1793,22 @@ class Router:
         return {"slot": slot["slot_id"], "status": "failed", "agent": None, "attempts": attempts, "run": None,
                 "escalation": "all eligible agents failed or were unavailable; no further automatic retries. Ask the user or fix availability."}
 
-    def execute(self, plan_id: str, simulate_unavailable: set[str] | None = None) -> dict:
-        self._guard_recursion()
-        plan = self.load_plan(plan_id)
+    def _assert_executable(self, plan: dict) -> None:
+        """Shared by execute() and resume(): tamper check on the plan file and the structural high-risk refusal."""
         if plan_fingerprint(plan) != plan.get("plan_hash"):
             raise RouterError("plan file does not match its recorded fingerprint (modified after planning); refusing")
+        if plan["mode"] == "write" and self.cfg.get("allow_writes") is not True:
+            raise RouterError(WRITES_OFF_MSG)
         # Structural re-check that does not trust any flag stored in the (agent-writable) plan file.
         write_scope = [x for st_ in plan["stages"] for sl in st_["slots"] if sl["mode"] == "write" for x in sl["scope"]]
         again = analyze_task(plan["task"], plan["mode"], plan["files"], plan["analysis"]["task_class"], None, write_scope)
         if plan["mode"] == "write" and ("high" in (again["risk"], plan["analysis"]["risk"]) or plan.get("requires_approval")):
             raise RouterError(HIGH_RISK_MSG)
+
+    def execute(self, plan_id: str, simulate_unavailable: set[str] | None = None) -> dict:
+        self._guard_recursion()
+        plan = self.load_plan(plan_id)
+        self._assert_executable(plan)
         h = hashlib.sha256((plan["task"] + plan["mode"]).encode()).hexdigest()[:16]
 
         def claim(s):   # atomic check-and-set: only one process/thread can ever start this plan
@@ -1822,7 +1852,7 @@ class Router:
             results["error"] = str(exc)
         finally:
             self._release(plan_id)
-            self._update_state(lambda st_: st_["tasks"].setdefault(plan_id, {}).update(running=False))
+            self._update_state(lambda st_: st_["tasks"].setdefault(plan_id, {}).update(running=False, resume_active=False))
         return self._finalize(plan, ctx)
 
     def _run_stages(self, plan: dict, ctx: dict, sim: set[str]) -> None:
@@ -1939,6 +1969,10 @@ class Router:
                 results["independent_review"] = "performed: REVIEWER FOUND ISSUES" + (f" (still open after {len(ctx['rounds'])} correction round(s))" if ctx["rounds"] else "") + " - do not accept the change before reading the review"
                 if ok:
                     results["status"] = "review_issues"
+            elif (rev["run"]["result"] or {}).get("verdict") == "inconclusive":
+                results["independent_review"] = "INCONCLUSIVE: the reviewer reported issues/limits but named no grounded defect (" + clip(str((rev["run"]["result"] or {}).get("summary", "")), 200) + ") - treat the change as NOT independently approved"
+                if ok:
+                    results["status"] = "review_required"
             else:
                 results["independent_review"] = "performed" + (f" (approved after {len(ctx['rounds'])} correction round(s))" if ctx["rounds"] else "")
                 if not rev["run"].get("tools_verified"):
@@ -1952,7 +1986,10 @@ class Router:
     def _finalize(self, plan: dict, ctx: dict) -> dict:
         plan_id, results, worktrees = plan["plan_id"], ctx["results"], ctx["worktrees"]
         results["worktrees"] = worktrees
-        if worktrees and results["status"] in ("completed", "review_issues", "review_required"):
+        violated = [sl.get("escalation") for sg in results.get("stages", []) for sl in sg.get("slots", []) if "during a read-only task" in (sl.get("escalation") or "")]
+        if violated:
+            results["proposal"] = {"withheld": "an agent modified the project during a read-only (review) step; the worktree may hold unreviewed edits. " + violated[0][:160]}
+        elif worktrees and results["status"] in ("completed", "review_issues", "review_required"):
             with contextlib.suppress(Exception):
                 results["proposal"] = self._proposal(plan, worktrees, results)
         results["decision_outcome"] = self._decision_outcome(plan, results)
@@ -2017,6 +2054,7 @@ class Router:
         """Continue a plan whose router/MCP process died mid-run: completed stages are kept, half-finished attempts are discarded, bounded by max_resumes."""
         self._guard_recursion()
         plan = self.load_plan(plan_id)
+        self._assert_executable(plan)
         pf = self.dir / "runs" / f"{plan_id}.progress.json"
         if plan["status"] != "running" or not pf.is_file():
             raise RouterError(f"plan {plan_id} is {plan['status']}; only an interrupted (running) plan with a progress record can be resumed")
@@ -2026,13 +2064,24 @@ class Router:
             raise RouterError(f"plan {plan_id} still looks alive (pid {prog.get('pid')}); not resuming a live run")
         if st.get("resumes", 0) >= self.lim.get("max_resumes", 2):
             raise RouterError(f"plan {plan_id} was already resumed {st.get('resumes')} times; escalate to a human")
-        self._update_state(lambda s: s["tasks"][plan_id].update(running=True, heartbeat=time.time(), resumes=s["tasks"][plan_id].get("resumes", 0) + 1))
+        def claim(s):     # one compare-and-set: two simultaneous resumes cannot both proceed
+            t = s["tasks"].setdefault(plan_id, {})
+            if t.get("resume_active") and time.time() - t.get("heartbeat", 0) < 30:
+                return False
+            t.update(running=True, resume_active=True, heartbeat=time.time(), resumes=t.get("resumes", 0) + 1)
+            return True
+        if not self._update_state(claim):
+            raise RouterError(f"plan {plan_id} is being resumed by another request")
         self._resume_n = self._state()["tasks"][plan_id]["resumes"]
         ctx = {"results": prog["results"], "executed_by": prog.get("executed_by", []), "prior": prog.get("prior"), "worktrees": prog.get("worktrees", {}),
                "rounds": prog.get("rounds", []), "next_stage": prog.get("next_stage", 0)}
+        wroot = self._worktree_root().resolve()
         for sid, w in ctx["worktrees"].items():
+            if not (Path(w).is_dir() and Path(w).resolve().is_relative_to(wroot) and (Path(w) / ".git").exists()):
+                self._update_state(lambda s: s["tasks"][plan_id].update(running=False, resume_active=False))
+                raise RouterError(f"worktree for slot {sid} ({w}) is not an isolated router worktree under {wroot}; refusing to resume on it")
             if not Path(w).is_dir():
-                self._update_state(lambda s: s["tasks"][plan_id].update(running=False))
+                self._update_state(lambda s: s["tasks"][plan_id].update(running=False, resume_active=False))
                 raise RouterError(f"worktree for slot {sid} is gone ({w}); cannot resume safely")
         return self._drive(plan, ctx, set(), fresh=False)
 
@@ -2194,7 +2243,8 @@ class Router:
         if not job.is_file():
             return {"plan_id": plan_id, "status": "not_started"}
         info = json.loads(job.read_text(encoding="utf-8"))
-        if info["status"] == "running" and time.time() - parse_iso(info["started"]).timestamp() > self.lim["timeout_s"] * 4:
+        gone = info["status"] == "running" and info.get("pid") and info["pid"] != os.getpid() and not pid_alive(info["pid"])
+        if info["status"] == "running" and (gone or time.time() - parse_iso(info["started"]).timestamp() > self.lim["timeout_s"] * 4):
             info["status"] = "interrupted (the server process that ran it is gone); call router_resume to continue from the last completed stage"
         return info
 

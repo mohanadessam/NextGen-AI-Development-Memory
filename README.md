@@ -71,7 +71,7 @@ python tools/ngrouter.py --project . cleanup <plan_id>          # إزالة ا�
 | الإصدار | الحالة |
 |---|---|
 | **v1.2.2** | نسخة مُجازة بعد مراجعتين مستقلتين وبوابة إصدار (`FINAL_RELEASE_GATE.md`) — الحكم: **CONDITIONAL GO** |
-| **v1.3** | **قيد التطوير**: منجَز (استرجاع Antigravity، سجل القدرات، المسارات المحمية والمقترحات، المُحقِّق المعزول، جولات التصحيح والاستئناف، التسليم التلقائي) — غير منجز (الموافقة الموثوقة، التمرين الحي الكامل، المراجعة الأخيرة، التثبيت في Nextory). التفاصيل في `V1_3_PROGRESS.md` |
+| **v1.3** | **CONDITIONAL GO** — اكتمل: استرجاع Antigravity، سجل القدرات الحيّ، التوجيه الديناميكي، الكتابة المعزولة، المُحقِّق المعزول، جولات التصحيح والاستئناف، تمرين حيّ بـ11 سيناريو، مراجعة Codex مستقلة، تثبيت للقراءة فقط في Nextory. غير مفعّل عمداً: الكتابة عالية الخطورة، الكتابة في Nextory، التحقق عبر MariaDB. التقرير: `NEXTGEN_AI_TEAM_V1_3_FINAL_REPORT.md` |
 
 ### الاختبارات
 ```powershell
@@ -118,11 +118,11 @@ template/tools/ngrouter.py router + MCP server      template/tools/ngcaps.py  ca
 template/tools/ngsandbox.py AppContainer sandbox    template/AGENTS*.md       shared agent instructions
 tests/                     unit, integration and live (authenticated) suites
 FINAL_RELEASE_GATE.md      v1.2.2 security review and verdict
-V1_3_PROGRESS.md          honest v1.3 status
+NEXTGEN_AI_TEAM_V1_3_FINAL_REPORT.md  v1.3 final report and per-capability verdicts
 ```
 
 **Security model in one paragraph.** High-risk writes are disabled outright (an approval cannot be enforced against agents that share the same OS account). Agents never commit, push or deploy. Verifiers are named commands from config, not free-form. Known limits: agent processes themselves are not OS-sandboxed (only verifiers are); MariaDB over TCP cannot run in the sandbox; Antigravity runs through an isolated profile because an IDE telemetry plugin breaks its headless tools.
 
-**Status:** v1.2.2 is the last release-gated version (**CONDITIONAL GO**, see `FINAL_RELEASE_GATE.md`). v1.3 is work in progress — see `V1_3_PROGRESS.md` for exactly what is done and what is not.
+**Status:** v1.3 — **CONDITIONAL GO** (11-scenario live exercise, independent Codex review, router-only read-only install in Nextory). High-risk writes, writes in Nextory and MariaDB-backed verification remain disabled/blocked by design. See `NEXTGEN_AI_TEAM_V1_3_FINAL_REPORT.md`.
 
 Private repository, managed by NextGen Git AutoSync.

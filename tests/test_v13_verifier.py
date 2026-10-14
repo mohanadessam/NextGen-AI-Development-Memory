@@ -225,5 +225,38 @@ echo "OK 1 passed\\n";
         self.assertFalse((self.project / "test.db").exists(), "the disposable database never reaches the host worktree")
 
 
+@unittest.skipUnless(SANDBOX_OK and shutil.which("node"), "needs the OS sandbox and node")
+class SandboxedNodeVerifier(RouterBase):
+    def setUp(self):
+        super().setUp()
+        cfgp = self.project / "ai-memory/router/config.json"
+        c = json.loads(cfgp.read_text())
+        c["verifier_backend"] = "auto"
+        cfgp.write_text(json.dumps(c))
+        self.r = ngr.Router(self.project)
+        (self.project / "test").mkdir(exist_ok=True)
+        (self.project / "fmt.js").write_text("exports.fmt = (n) => n.toFixed(2);\n")
+
+    def write(self, expect):
+        (self.project / "test" / "fmt.test.js").write_text(
+            "const test = require('node:test'); const assert = require('node:assert'); const { fmt } = require('../fmt.js');\n"
+            f"test('fmt', () => assert.strictEqual(fmt(3), '{expect}'));\n"
+            "test('no network, not even loopback', async () => { await assert.rejects(() => fetch('http://127.0.0.1:9/')); });\n"
+            "test('host environment is invisible', () => assert.strictEqual(process.env.NGV_NODE_SECRET, undefined));\n"
+            "test('cannot read the host profile', () => assert.throws(() => require('fs').readdirSync(process.env.NGV_HOME_PROBE)));\n")
+        self.git_repo()
+
+    def test_node_tests_run_in_process_with_hostile_checks_and_failures_are_detected(self):
+        os.environ["NGV_NODE_SECRET"] = "leak"
+        os.environ["NGV_HOME_PROBE"] = str(Path.home())
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("NGV_NODE_SECRET", "NGV_HOME_PROBE")])
+        self.r.cfg["sandbox_env"] = {"NGV_HOME_PROBE": str(Path.home())}          # an explicitly passed variable IS visible; the host secret is not
+        self.write("3.00")
+        ev = self.r._test_evidence(["node", "test/fmt.test.js"], self.project)
+        self.assertEqual((ev["score"], ev["backend"]), (1.0, "appcontainer"), ev["detail"])
+        self.write("4.00")
+        self.assertEqual(self.r._test_evidence(["node", "test/fmt.test.js"], self.project)["score"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
