@@ -1,0 +1,26 @@
+# NextGen Git AutoSync safety defaults
+.env
+.env.*
+!.env.example
+!.env.sample
+node_modules/
+vendor/
+storage/logs/
+bootstrap/cache/*.php
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+Thumbs.db
+*.pem
+*.key
+id_rsa
+id_rsa.*
+credentials.json
+service-account*.json
+.nextgen-nosync

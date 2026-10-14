@@ -1,0 +1,200 @@
+fixture tests before any agent work: FAILED (failures=3)
+
+== P0 detection
+  claude: available=True (logged in via claude.ai)
+  codex: available=True (Logged in using ChatGPT)
+  antigravity: available=True (14 models listed)
+
+== P1 calibration: identical read-only task on every agent (manual override = evidence gathering)
+  codex: outcome=completed latency=22.56s tokens={'in': 8622, 'out': 867, 'cached_in': 12288} findings=3 true_bugs=3/3 evidence=[('process_ok', 1.0), ('schema_valid', 1.0), ('readonly_integrity', 1.0), ('grounding', 1.0)]
+   -> Evidence recorded for codex on ngr-20261009-024703-2afe.s1.1.codex: finding_validated score=1.0 via reproduction
+  claude: outcome=completed latency=30.5s tokens={'in': 20950, 'out': 2455, 'cached_in': 30476} findings=3 true_bugs=3/3 evidence=[('process_ok', 1.0), ('schema_valid', 1.0), ('readonly_integrity', 1.0), ('grounding', 1.0)]
+   -> Evidence recorded for claude on ngr-20261009-024703-ff8c.s1.1.claude: finding_validated score=1.0 via reproduction
+  antigravity: outcome=completed latency=51.2s tokens={'in': 27007, 'out': 13354, 'cached_in': 16340} findings=3 true_bugs=3/3 evidence=[('process_ok', 1.0), ('schema_valid', 1.0), ('readonly_integrity', 1.0), ('grounding', 1.0)]
+   -> Evidence recorded for antigravity on ngr-20261009-024703-a97a.s1.1.antigravity: finding_validated score=1.0 via reproduction
+
+== P2 same task, changing conditions (auto routing, no override)
+  [state A] all agents healthy, evidence from P1 -> executor = codex   candidates=['codex', 'claude', 'antigravity']
+    codex        utility=0.463   quality=0.778 conf=0.33 completion=0.84 lat_s=22.56 fail_pen=0.0 explore=0.06
+    claude       utility=0.41    quality=0.778 conf=0.33 completion=0.84 lat_s=30.5 fail_pen=0.0 explore=0.06
+    antigravity  utility=0.364   quality=0.778 conf=0.33 completion=0.84 lat_s=51.2 fail_pen=0.0 explore=0.06
+  [state B] REAL failure of codex: its CLI is pointed at a non-existent model; router executes the plan
+   [executor/s1] completed via codex:failed -> claude:completed
+     summary: Reviewed inventory.py against test_inventory.py and found three correctness bugs: balance() adds outgoing quantity instead of subtracting it, average_cost() divides by len(costs)-1 instead of len(costs), and can_ship() uses strict '>' which rejects shipping exactly at the available balance. No code was run or modified.
+     - [high] balance() adds outgoing quantity instead of subtracting it @ inventory.py:18
+     - [high] average_cost() off-by-one denominator @ inventory.py:24
+     - [medium] can_ship() rejects shipping the exact available balance @ inventory.py:27
+     evidence process_ok: score=1.0 (exited cleanly with a message)
+     evidence schema_valid: score=1.0 (result JSON matches the required shape)
+     evidence readonly_integrity: score=1.0 (working tree unchanged)
+     evidence grounding: score=1.0 (3/3 cited quotes found at cited location)
+   independent review: not required (risk proportional)
+   
+   (status=completed, plan=ngr-20261009-024755-39ab)
+  attempts: [["codex", "failed"], ["claude", "completed"]]
+  [state B'] same task re-planned after codex's failure history -> executor = claude   candidates=['claude', 'antigravity', 'codex']
+    claude       utility=0.4093  quality=0.875 conf=0.5 completion=0.867 lat_s=99.56 fail_pen=0.0 explore=0.04
+    antigravity  utility=0.3853  quality=0.778 conf=0.33 completion=0.84 lat_s=51.2 fail_pen=0.0 explore=0.06
+    codex        utility=0.2089  quality=0.5 conf=0.5 completion=0.7 lat_s=22.56 fail_pen=0.1 explore=0.04
+  [state C] codex fails again (still misconfigured) -> circuit breaker
+  [state C'] same task -> executor = claude   candidates=['claude', 'antigravity']
+    claude       utility=0.4583  quality=0.92 conf=0.6 completion=0.886 lat_s=51.92 fail_pen=0.0 explore=0.03
+    antigravity  utility=0.3933  quality=0.778 conf=0.33 completion=0.84 lat_s=51.2 fail_pen=0.0 explore=0.06
+    UNAVAILABLE: {"codex": "circuit breaker open after 2 consecutive failures"}
+
+== P3 write task, auto routing, isolated worktree, independent review
+  class=debug risk=medium strategy=single approval=False
+  stages: [["executor", ["claude", "antigravity", "codex"]], ["reviewer", ["antigravity", "codex"]]]
+    claude       utility=0.5555  quality=0.8 conf=0.0 completion=0.886 lat_s=51.92 fail_pen=0.0 explore=0.0
+    antigravity  utility=0.4601  quality=0.667 conf=0.0 completion=0.84 lat_s=51.2 fail_pen=0.0 explore=0.0
+    codex        utility=0.3076  quality=0.4 conf=0.0 completion=0.6 lat_s=22.56 fail_pen=0.0 explore=0.0
+[executor/s1] completed via claude:completed
+  summary: Fixed three bugs in inventory.py's StockLedger class: balance() was adding outgoing quantity instead of subtracting it, average_cost() divided by len(costs)-1 instead of len(costs), and can_ship() used > instead of >= so exact-balance shipments were wrongly rejected. Only inventory.py was edited; test_inventory.py was untouched. Actual pytest/unittest execution was blocked by a
+…[truncated]
+  - [high] balance() summed outgoing instead of subtracting it @ inventory.py:18
+  - [high] average_cost() used off-by-one divisor @ inventory.py:24
+  - [medium] can_ship() rejected shipments equal to exact balance @ inventory.py:27
+  evidence process_ok: score=1.0 (exited cleanly with a message)
+  evidence schema_valid: score=1.0 (result JSON matches the required shape)
+  evidence grounding: score=0.0 (0/3 cited quotes found at cited location; ungrounded: ['inventory.py:18', 'inventory.py:24', 'inventory.py:27'])
+  evidence produced_change: score=1.0 (1 changed paths)
+  evidence scope_respected: score=0.0 (OUT OF SCOPE: ['nventory.py'])
+  evidence tests: score=1.0 (rc=0 passed=? failed=? :: OK)
+[reviewer/r1] completed via antigravity:completed
+  summary: Independently verified the executor's proposed changes to inventory.py against test_inventory.py. The three bug fixes accurately resolve logic errors in balance, average_cost, and can_ship without side effects. All unit tests pass under the corrected implementation.
+  verdict: confirmed
+  evidence process_ok: score=1.0 (exited cleanly with a message)
+  evidence schema_valid: score=1.0 (result JSON matches the required shape)
+  evidence readonly_integrity: score=1.0 (working tree unchanged)
+independent review: performed
+
+(status=completed, plan=ngr-20261009-025034-df27)
+  main tree inventory.py still buggy: True
+  worktree diff:
+    -                total += e["in"] + e["out"]
+    +                total += e["in"] - e["out"]
+    -        return sum(costs) / (len(costs) - 1)
+    +        return sum(costs) / len(costs)
+    -        return self.balance(sku) > qty
+    +        return self.balance(sku) >= qty
+  cleanup: s1: removed
+
+== P4 approval gate (high-risk write must not run without the user's explicit approval)
+  risk=high requires_approval=True reasons=['high-risk write modification']
+  execute without approval -> {  "plan_id": "ngr-20261009-025233-2d02",  "status": "approval_required",  "reasons": [   "high-risk write modification"  ],  "plan": [   "task not decomposed: splitting would add coordination cost without independent pieces",   "risk=high: independent review 
+
+== P5 router over the real MCP stdio server
+  tools: ['memory_overview', 'read_memory', 'search_memory', 'record_decision', 'record_idea', 'record_progress', 'create_handoff', 'router_status', 'router_plan', 'router_delegate', 'router_result', 'router_approve', 'router_record_evidence', 'router_registry', 'router_cleanup']
+  router_delegate (background) -> {'plan_id': 'ngr-20261009-025233-7bce', 'status': 'running', 'poll': 'call router_result with this plan_id'}
+  router_result -> completed 
+   [executor/s1] completed via claude:completed
+     summary: Reviewed inventory.py against the behavior asserted in test_inventory.py and found three correctness bugs: balance() adds outgoing quantity instead of subtracting it, average_cost() divides by count-1 instead of count, and can_ship() rejects shipping exactly the full balance.
+     - [high] balance() adds outgoing quantity instead of subtracting it @ inventory.py:18
+     - [high] average_cost() divides by (count - 1) instead of count @ inventory.py:24
+     - [medium] can_ship() excludes the case where qty exactly equals balance @ inventory.py:27
+     evidence process_ok: score=1.0 (exited cleanly with a message)
+     evidence schema_valid: score=1.0 (result JSON matches the required shape)
+     evidence readonly_integrity: score=1.0 (working tree unchanged)
+     evidence grounding: score=1.0 (3/3 cited quotes found at cited locati
+
+== Final registry
+{
+ "agents": {
+  "claude": {
+   "runs": 5,
+   "completed": 5,
+   "failed": 0,
+   "timeouts": 0,
+   "invalid_output": 0,
+   "rate_limited": 0,
+   "unavailable": 0,
+   "retries_as_failover_target": 2,
+   "median_latency_s": 51.92,
+   "by_class": {
+    "review": {
+     "quality": 0.93,
+     "n_quality": 4.0,
+     "confidence": 0.667,
+     "completion": 0.911,
+     "latency_s": 51.92,
+     "tokens": 24266.0,
+     "n_runs": 5,
+     "n_class_runs": 4,
+     "n_pooled": 5.0
+    },
+    "debug": {
+     "quality": 0.705,
+     "n_quality": 1.0,
+     "confidence": 0.333,
+     "completion": 0.911,
+     "latency_s": 61.25,
+     "tokens": 60949.0,
+     "n_runs": 5,
+     "n_class_runs": 1,
+     "n_pooled": 5.0
+    }
+   }
+  },
+  "codex": {
+   "runs": 3,
+   "completed": 1,
+   "failed": 2,
+   "timeouts": 0,
+   "invalid_output": 0,
+   "rate_limited": 0,
+   "unavailable": 0,
+   "retries_as_failover_target": 0,
+   "median_latency_s": 22.56,
+   "by_class": {
+    "review": {
+     "quality": 0.36,
+     "n_quality": 3.0,
+     "confidence": 0.6,
+     "completion": 0.6,
+     "latency_s": 22.56,
+     "tokens": 9489.0,
+     "n_runs": 3,
+     "n_class_runs": 3,
+     "n_pooled": 3.0
+    }
+   }
+  },
+  "antigravity": {
+   "runs": 2,
+   "completed": 2,
+   "failed": 0,
+   "timeouts": 0,
+   "invalid_output": 0,
+   "rate_limited": 0,
+   "unavailable": 0,
+   "retries_as_failover_target": 0,
+   "median_latency_s": 53.95,
+   "by_class": {
+    "review": {
+     "quality": 0.833,
+     "n_quality": 1.0,
+     "confidence": 0.333,
+     "completion": 0.867,
+     "latency_s": 51.2,
+     "tokens": 40361.0,
+     "n_runs": 2,
+     "n_class_runs": 1,
+     "n_pooled": 2.0
+    },
+    "debug": {
+     "quality": 0.833,
+     "n_quality": 1.0,
+     "confidence": 0.333,
+     "completion": 0.867,
+     "latency_s": 53.95,
+     "tokens": 43823.0,
+     "n_runs": 2,
+     "n_class_runs": 1,
+     "n_pooled": 2.0
+    }
+   }
+  }
+ },
+ "ignored_non_objective_evidence": 0,
+ "note": "Scores use only router-observed process/file/git facts, test runs, reproductions, and user/coordinator-validated findings. Model self-reported confidence is stored but never scored."
+}
